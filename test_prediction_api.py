@@ -24,7 +24,10 @@ from contextlib import asynccontextmanager
 import numpy as np
 import pandas as pd
 import joblib
-from ai_edge_litert.interpreter import Interpreter
+try:
+    from tflite_runtime.interpreter import Interpreter
+except ImportError:
+    from ai_edge_litert.interpreter import Interpreter
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
