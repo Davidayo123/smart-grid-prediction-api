@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: smart-grid-prediction-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn test_prediction_api:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: MQTT_BROKER
+        value: localhost

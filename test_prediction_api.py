@@ -318,7 +318,7 @@ def start_mqtt_bridge():
                 mqtt_client.loop_start()
                 print(f"MQTT bridge started -> {MQTT_BROKER}:{MQTT_PORT}")
                 return  # success — stop retrying
-            except OSError as exc:
+            except Exception as exc:
                 print(f"[WARN] MQTT broker unreachable ({exc}) - retrying in 5s...")
                 import time
                 time.sleep(5)
@@ -336,9 +336,12 @@ async def lifespan(app_instance: FastAPI):
     """Start MQTT bridge on boot, clean up on shutdown."""
     start_mqtt_bridge()
     yield
-    mqtt_client.loop_stop()
-    mqtt_client.disconnect()
-    print("MQTT bridge disconnected.")
+    try:
+        mqtt_client.loop_stop()
+        mqtt_client.disconnect()
+        print("MQTT bridge disconnected.")
+    except Exception:
+        pass
 
 
 app = FastAPI(
