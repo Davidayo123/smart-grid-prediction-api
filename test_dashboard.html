@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ML Prediction Tester</title>
+  <meta name="description" content="Manual input test dashboard for the Smart Grid Hybrid ML prediction API" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+  <style>
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+      background: linear-gradient(135deg, #f0f4ff 0%, #e8ecf8 50%, #f5f0ff 100%);
+      color: #334155;
+      min-height: 100vh;
+      padding: 2rem 1rem;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      font-size: 1.65rem;
+      font-weight: 800;
+      color: #1e293b;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    h1 .icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, #8b5cf6, #ec4899);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-size: 1rem;
+      box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+    }
+
+    .subtitle {
+      font-size: 0.78rem;
+      color: #64748b;
+      margin-top: 0.2rem;
+    }
+
+    .card {
+      background: rgba(255, 255, 255, 0.92);
+      border: 1px solid rgba(255, 255, 255, 0.8);
+      border-radius: 1rem;
+      padding: 1.5rem;
+      margin-top: 1.5rem;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+    }
+
+    .card-title {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #64748b;
+      margin-bottom: 1rem;
+    }
+
+    .card-title .badge {
+      width: 26px;
+      height: 26px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.65rem;
+    }
+
+    .input-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+      gap: 0.85rem;
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+    }
+
+    .field label {
+      font-size: 0.65rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #94a3b8;
+    }
+
+    .field input,
+    .field select {
+      padding: 0.55rem 0.75rem;
+      border-radius: 0.5rem;
+      border: 1.5px solid #e2e8f0;
+      background: #f8fafc;
+      font-family: inherit;
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: #1e293b;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .field input:focus,
+    .field select:focus {
+      border-color: #8b5cf6;
+      box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.12);
+    }
+
+    .field .unit {
+      font-size: 0.6rem;
+      color: #94a3b8;
+      font-weight: 600;
+      margin-top: -0.15rem;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.7rem 1.75rem;
+      border: none;
+      border-radius: 0.65rem;
+      font-family: inherit;
+      font-size: 0.88rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+      color: white;
+      box-shadow: 0 4px 14px rgba(124, 58, 237, 0.3);
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 18px rgba(124, 58, 237, 0.4);
+    }
+
+    .btn-primary:active {
+      transform: translateY(0);
+    }
+
+    .btn-primary:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .btn-secondary {
+      background: #f1f5f9;
+      color: #64748b;
+      border: 1px solid #e2e8f0;
+    }
+
+    .btn-secondary:hover {
+      background: #e2e8f0;
+    }
+
+    .actions {
+      display: flex;
+      gap: 0.75rem;
+      margin-top: 1.25rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .output-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+      gap: 0.75rem;
+      margin-top: 1rem;
+    }
+
+    .out-cell {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 0.65rem;
+      padding: 0.85rem;
+      text-align: center;
+      box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.03);
+      transition: transform 0.2s;
+    }
+
+    .out-cell.highlight {
+      background: linear-gradient(135deg, #f5f3ff, #ede9fe);
+      border-color: #c4b5fd;
+    }
+
+    .out-cell .label {
+      font-size: 0.58rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #94a3b8;
+      margin-bottom: 0.3rem;
+    }
+
+    .out-cell .value {
+      font-size: 1.3rem;
+      font-weight: 800;
+      color: #1e293b;
+    }
+
+    .out-cell .unit {
+      font-size: 0.65rem;
+      font-weight: 600;
+      color: #94a3b8;
+    }
+
+    .out-cell.highlight .value {
+      color: #7c3aed;
+    }
+
+    .log-panel {
+      background: #f1f5f9;
+      border: 1px solid #e2e8f0;
+      border-radius: 0.65rem;
+      padding: 0.85rem;
+      max-height: 200px;
+      overflow-y: auto;
+      font-family: 'SF Mono', 'Consolas', monospace;
+      font-size: 0.68rem;
+      color: #475569;
+      line-height: 1.7;
+      margin-top: 0.75rem;
+    }
+
+    .log-panel p {
+      margin: 0;
+    }
+
+    .log-panel .t {
+      color: #8b5cf6;
+      font-weight: 600;
+    }
+
+    .log-panel .ok {
+      color: #059669;
+    }
+
+    .log-panel .err {
+      color: #dc2626;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 2.5rem 1rem;
+      color: #94a3b8;
+      font-size: 0.8rem;
+    }
+
+    .empty-state i {
+      font-size: 1.8rem;
+      margin-bottom: 0.5rem;
+      display: block;
+      color: #c4b5fd;
+    }
+
+    @media (max-width: 500px) {
+      .input-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .output-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    ::-webkit-scrollbar {
+      width: 5px;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: rgba(139, 92, 246, 0.2);
+      border-radius: 3px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+
+    <!-- Header -->
+    <div>
+      <h1>
+        <span class="icon"><i class="fa-solid fa-brain"></i></span>
+        ML Prediction Tester
+      </h1>
+      <p class="subtitle">Enter sensor values → get hybrid GRU + LightGBM predictions (HTTP only)</p>
+    </div>
+
+    <!-- ═══════ INPUT CARD ═══════ -->
+    <div class="card">
+      <div class="card-title">
+        <span class="badge" style="background:#dbeafe;color:#1d4ed8;">
+          <i class="fa-solid fa-sliders"></i>
+        </span>
+        Sensor Inputs
+      </div>
+
+      <div class="input-grid">
+        <div class="field">
+          <label for="datetime_input">Date & Time</label>
+          <input type="datetime-local" id="datetime_input" />
+          <span class="unit">Local</span>
+        </div>
+        <div class="field">
+          <label for="temperature_c">Temperature</label>
+          <input type="number" id="temperature_c" value="28.0" step="0.1" />
+          <span class="unit">°C</span>
+        </div>
+        <div class="field">
+          <label for="humidity">Humidity</label>
+          <input type="number" id="humidity" value="60.0" step="0.1" />
+          <span class="unit">%</span>
+        </div>
+        <div class="field">
+          <label for="lux">Luminous Intensity</label>
+          <input type="number" id="lux" value="400.0" step="1" />
+          <span class="unit">Lux</span>
+        </div>
+        <div class="field">
+          <label for="occupancy">Occupancy</label>
+          <select id="occupancy">
+            <option value="1" selected>1 — Occupied</option>
+            <option value="0">0 — Empty</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="btnPredict" class="btn btn-primary" onclick="callPredict()">
+          <i class="fa-solid fa-bolt"></i> Predict
+        </button>
+        <button class="btn btn-secondary" onclick="callPredictNext()">
+          <i class="fa-solid fa-forward"></i> Auto Next (CSV)
+        </button>
+        <span id="reqCounter" style="font-size:0.72rem;color:#64748b;font-weight:600;margin-left:auto;">
+          0 predictions
+        </span>
+      </div>
+    </div>
+
+    <!-- ═══════ OUTPUT CARD ═══════ -->
+    <div class="card">
+      <div class="card-title">
+        <span class="badge" style="background:#dcfce7;color:#166534;">
+          <i class="fa-solid fa-chart-line"></i>
+        </span>
+        Prediction Output
+      </div>
+
+      <div id="outputArea">
+        <div class="empty-state">
+          <i class="fa-solid fa-flask"></i>
+          Enter your sensor values above and click <strong>Predict</strong>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════ LOG CARD ═══════ -->
+    <div class="card">
+      <div class="card-title">
+        <span class="badge" style="background:#fce7f3;color:#9d174d;">
+          <i class="fa-solid fa-clock-rotate-left"></i>
+        </span>
+        Request Log
+      </div>
+      <div id="logPanel" class="log-panel">
+        <p style="color:#94a3b8;font-style:italic;">No requests yet…</p>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    const API_BASE = 'http://127.0.0.1:5000';
+    let reqCount = 0;
+    let logStarted = false;
+
+    function addLog(msg, cls) {
+      const el = document.getElementById('logPanel');
+      if (!logStarted) { el.innerHTML = ''; logStarted = true; }
+      const now = new Date().toLocaleTimeString();
+      const p = document.createElement('p');
+      p.innerHTML = `<span class="t">[${now}]</span> <span class="${cls || ''}">${msg}</span>`;
+      el.prepend(p);
+      while (el.children.length > 60) el.removeChild(el.lastChild);
+    }
+
+    function renderOutput(data) {
+      const el = document.getElementById('outputArea');
+      const pred = data.predictions || {};
+      const inp = data.live_sensors || {};
+      let html = '';
+
+      // Inputs echo
+      if (Object.keys(inp).length) {
+        html += `<div style="font-size:0.65rem;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:0.5rem;">
+          <i class="fa-solid fa-arrow-right" style="margin-right:4px;"></i> Inputs Used
+        </div><div class="output-grid">`;
+        const map = { temperature_c: ['Temp', '°C'], humidity: ['Humidity', '%'], lux: ['Lux', 'lx'], occupancy: ['Occupancy', ''] };
+        for (const [key, [label, unit]] of Object.entries(map)) {
+          if (inp[key] !== undefined) {
+            html += `<div class="out-cell"><div class="label">${label}</div>
+              <div class="value">${typeof inp[key] === 'number' ? inp[key].toFixed(2) : inp[key]}</div>
+              <div class="unit">${unit}</div></div>`;
+          }
+        }
+        html += '</div>';
+      }
+
+      // Predictions
+      html += `<div style="font-size:0.65rem;font-weight:700;color:#8b5cf6;text-transform:uppercase;letter-spacing:0.04em;margin:1rem 0 0.5rem;">
+        <i class="fa-solid fa-bolt" style="margin-right:4px;"></i> Model Predictions
+      </div><div class="output-grid">`;
+
+      const items = [
+        ['Actual Energy', pred.actual_energy_kw, 'kWh', true],
+        ['Hybrid Final', pred.hybrid_final_kwh, 'kWh', true],
+        ['Upper Bound', pred.safety_upper_bound, 'kWh', true],
+        ['Lower Bound', pred.safety_lower_bound, 'kWh', false]
+      ];
+      for (const [label, value, unit, hl] of items) {
+        if (value === undefined || value === null) continue;
+        html += `<div class="out-cell${hl ? ' highlight' : ''}">
+          <div class="label">${label}</div>
+          <div class="value">${typeof value === 'number' ? value.toFixed(4) : value}</div>
+          <div class="unit">${unit}</div></div>`;
+      }
+
+      if (data.timestamp) {
+        html += `<div class="out-cell" style="grid-column:1/-1;">
+          <div class="label">Timestamp</div>
+          <div class="value" style="font-size:0.75rem;">${data.timestamp}</div></div>`;
+      }
+      html += '</div>';
+      el.innerHTML = html;
+    }
+
+    function getInputs() {
+      const body = {
+        temperature_c: parseFloat(document.getElementById('temperature_c').value),
+        humidity: parseFloat(document.getElementById('humidity').value),
+        lux: parseFloat(document.getElementById('lux').value),
+        occupancy: parseInt(document.getElementById('occupancy').value)
+      };
+      const dt = document.getElementById('datetime_input').value;
+      if (dt) body.datetime_str = dt;
+      return body;
+    }
+
+    async function callPredict() {
+      const btn = document.getElementById('btnPredict');
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Running…';
+
+      try {
+        const t0 = performance.now();
+        const resp = await fetch(API_BASE + '/predict', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(getInputs()),
+        });
+        const ms = (performance.now() - t0).toFixed(0);
+        if (!resp.ok) { addLog(`HTTP ${resp.status}`, 'err'); return; }
+        const data = await resp.json();
+        reqCount++;
+        document.getElementById('reqCounter').textContent = reqCount + ' predictions';
+        renderOutput(data);
+        addLog(`POST /predict → ${data.predictions?.hybrid_final_kwh?.toFixed(4) ?? '?'} kW (${ms}ms)`, 'ok');
+      } catch (err) {
+        addLog('Error: ' + err.message, 'err');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-bolt"></i> Predict';
+      }
+    }
+
+    async function callPredictNext() {
+      try {
+        const t0 = performance.now();
+        const resp = await fetch(API_BASE + '/predict_next');
+        const ms = (performance.now() - t0).toFixed(0);
+        if (!resp.ok) { addLog(`HTTP ${resp.status}`, 'err'); return; }
+        const data = await resp.json();
+        if (data.error) { addLog(data.error, 'err'); return; }
+        reqCount++;
+        document.getElementById('reqCounter').textContent = reqCount + ' predictions';
+
+        // Auto-fill inputs with what the CSV had
+        const inp = data.live_sensors || {};
+        if (inp.temperature_c !== undefined) document.getElementById('temperature_c').value = inp.temperature_c.toFixed(1);
+        if (inp.humidity !== undefined) document.getElementById('humidity').value = inp.humidity.toFixed(1);
+        if (inp.lux !== undefined) document.getElementById('lux').value = inp.lux.toFixed(1);
+        if (inp.occupancy !== undefined) document.getElementById('occupancy').value = inp.occupancy;
+
+        renderOutput(data);
+        addLog(`GET /predict_next → ${data.predictions?.hybrid_final_kwh?.toFixed(4) ?? '?'} kW (${ms}ms)`, 'ok');
+      } catch (err) {
+        addLog('Error: ' + err.message, 'err');
+      }
+    }
+  </script>
+</body>
+
+</html>
