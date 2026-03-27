@@ -40,7 +40,7 @@ import paho.mqtt.client as mqtt
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════
 BASE_DIR = "."
-CSV_PATH = os.path.join(BASE_DIR, "abs_smart_grid_dataset_20k.csv")
+CSV_PATH = os.path.join(BASE_DIR, "abs_smart_grid_dataset_40k.csv")
 WINDOW_SIZE = 24
 
 # MQTT
@@ -406,7 +406,8 @@ def predict_manual(sensor: SensorInput):
     live_window.loc[idx, 'Timestamp'] = user_ts
 
     res = run_prediction(live_window)
-    current_sim_index += 1
+    # Exclude `current_sim_index += 1` here so manual predictions don't advance the simulation clock.
+    # Otherwise, multiple clicks on the same input will diverge as the real history shifts forward.
     return res
 
 
