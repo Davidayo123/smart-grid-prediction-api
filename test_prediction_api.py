@@ -40,7 +40,7 @@ import paho.mqtt.client as mqtt
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════
 BASE_DIR = "."
-CSV_PATH = os.path.join(BASE_DIR, "abs_smart_grid_dataset_40k.csv")
+CSV_PATH = os.path.join(BASE_DIR, "perfectdata3.csv")
 WINDOW_SIZE = 24
 
 # MQTT
@@ -62,6 +62,15 @@ current_sim_index = WINDOW_SIZE
 # ═══════════════════════════════════════════════════════════════════
 print("Loading AI assets...")
 df_sim = pd.read_csv(CSV_PATH)
+rename_map = {
+    'timestamp': 'Timestamp',
+    'temperature': 'Temperature_C',
+    'humidity': 'Humidity_%',
+    'lux': 'Luminous_Intensity_Lux',
+    'occupancy': 'Occupancy',
+    'energy': 'Energy_kW'
+}
+df_sim = df_sim.rename(columns=rename_map)
 if 'Luminous_Intensity' in df_sim.columns and 'Luminous_Intensity_Lux' not in df_sim.columns:
     df_sim = df_sim.rename(columns={'Luminous_Intensity': 'Luminous_Intensity_Lux'})
 df_sim['Timestamp'] = pd.to_datetime(df_sim['Timestamp'])
@@ -261,7 +270,8 @@ def build_mqtt_payload(result: dict) -> dict:
     return {
         "predicted_energy_kw": pred["hybrid_final_kwh"],
         "upper_bound_energy_kw": pred["safety_upper_bound"],
-        "predicted_energy_range": pred["safety_upper_bound"],
+        "lower_bound_energy_kw": pred["safety_lower_bound"],
+        "predicted_energy_range": [pred["safety_lower_bound"], pred["safety_upper_bound"]],
         "peak_demand": PEAK_DEMAND_KW,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "source": "fastapi-local-model",
