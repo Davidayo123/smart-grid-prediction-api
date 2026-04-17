@@ -41,7 +41,7 @@ import paho.mqtt.client as mqtt
 # ═══════════════════════════════════════════════════════════════════
 BASE_DIR = "."
 CSV_PATH = os.path.join(BASE_DIR, "perfectdata3.csv")
-WINDOW_SIZE = 24
+WINDOW_SIZE = 168  # Expanded to allow for lag_168 feature
 
 # MQTT
 MQTT_BROKER = os.environ.get("MQTT_BROKER", "localhost")
@@ -75,10 +75,14 @@ if 'Luminous_Intensity' in df_sim.columns and 'Luminous_Intensity_Lux' not in df
     df_sim = df_sim.rename(columns={'Luminous_Intensity': 'Luminous_Intensity_Lux'})
 df_sim['Timestamp'] = pd.to_datetime(df_sim['Timestamp'])
 
-scaler = joblib.load(os.path.join(BASE_DIR, "v2_scalar.joblib"))
-lgb_corrector = joblib.load(os.path.join(BASE_DIR, "v3_residual_lightgbm_model.joblib"))
+scaler_dict = joblib.load(os.path.join(BASE_DIR, "scaler.joblib"))
+scaler_X = scaler_dict['scaler_X']
+scaler_y = scaler_dict['scaler_y']
+EXPECTED_FEATURES = scaler_dict['feature_names']
 
-interpreter = Interpreter(model_path=os.path.join(BASE_DIR, "v2_final_te_gru_model.tflite"))
+lgb_model = joblib.load(os.path.join(BASE_DIR, "lightgbm_model.pkl"))
+
+interpreter = Interpreter(model_path=os.path.join(BASE_DIR, "te_gru_model_final.tflite"))
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
@@ -86,153 +90,184 @@ print("[OK] AI assets loaded")
 
 
 # ═══════════════════════════════════════════════════════════════════
-# BAYESIAN UNCERTAINTY ESTIMATOR
+# BAYESIAN UNCERTAINTY & ADAPTIVE WEIGHT ESTIMATOR
 # ═══════════════════════════════════════════════════════════════════
-class MHUncertaintyEstimator:
-    """Metropolis-Hastings sampler for posterior sigma estimation.
+class MHWeightEstimator:
+    """Metropolis-Hastings sampler for adaptive component weighting."""
+    def __init__(self, n_iterations=1000, proposal_std=0.02, temperature=1e-4):
+        self.n_iterations = n_iterations
+        self.proposal_std = proposal_std
+        self.temperature = temperature
 
-    Uses log-normal proposals (guarantees positivity) and a weakly
-    informative half-normal prior on sigma.
-    """
-    def __init__(self, iterations=500, burn_in=100, proposal_scale=0.15):
-        self.iterations = iterations
-        self.burn_in = burn_in
-        self.proposal_scale = proposal_scale
+    def estimate_weight(self, y_true: np.ndarray, pred_gru: np.ndarray, pred_lgbm: np.ndarray, w_init=0.5) -> float:
+        if len(y_true) < 2:
+            return w_init
+            
+        def hybrid_loss(w):
+            blended = w * pred_gru + (1 - w) * pred_lgbm
+            return float(np.mean((y_true - blended) ** 2))
 
-    def estimate_sigma(self, residuals: np.ndarray, initial_sigma: float) -> float:
-        if len(residuals) < 2:
-            return max(0.01, initial_sigma)
-        initial_sigma = max(0.001, initial_sigma)
+        w_current = w_init
+        loss_current = hybrid_loss(w_current)
+        best_w = w_current
+        best_loss = loss_current
 
-        n = len(residuals)
-        ss = float(np.sum(residuals ** 2))  # precompute sum-of-squares
+        rng = np.random.RandomState(int(abs(loss_current * 1e5)) % (2 ** 31))
 
-        def log_posterior(sigma):
-            if sigma <= 1e-6:
-                return -np.inf
-            # Gaussian likelihood: residuals ~ N(0, sigma)
-            ll = -n * np.log(sigma) - ss / (2.0 * sigma ** 2)
-            # Weakly informative half-normal prior (scale=1.0)
-            lp = -0.5 * (sigma ** 2)
-            return ll + lp
+        for _ in range(self.n_iterations):
+            w_proposed = np.clip(w_current + rng.normal(0, self.proposal_std), 0.0, 1.0)
+            loss_proposed = hybrid_loss(w_proposed)
 
-        current_sigma = initial_sigma
-        current_lp = log_posterior(current_sigma)
-        chain = []
+            delta_loss = loss_proposed - loss_current
+            # Avoid division by zero
+            alpha = min(1.0, np.exp(-delta_loss / max(self.temperature, 1e-8)))
 
-        rng = np.random.RandomState(int(abs(ss * 1e4)) % (2 ** 31))
+            if rng.uniform(0, 1) < alpha:
+                w_current = w_proposed
+                loss_current = loss_proposed
+                if loss_current < best_loss:
+                    best_loss = loss_current
+                    best_w = w_current
 
-        for _ in range(self.iterations):
-            # Log-normal proposal — always positive
-            proposed = current_sigma * np.exp(
-                rng.normal(0, self.proposal_scale)
-            )
-            proposed_lp = log_posterior(proposed)
-
-            # Hastings ratio includes Jacobian correction for log-normal
-            log_alpha = (proposed_lp - current_lp
-                         + np.log(proposed) - np.log(current_sigma))
-
-            if np.log(rng.rand()) < log_alpha:
-                current_sigma = proposed
-                current_lp = proposed_lp
-
-            chain.append(current_sigma)
-
-        post_burn = chain[self.burn_in:]
-        if len(post_burn) > 0:
-            return float(np.median(post_burn))  # median is more robust
-        return current_sigma
+        return best_w
 
 
-class ResidualTracker:
-    """Rolling window of (predicted - actual) residuals for uncertainty."""
+class HistoryTracker:
+    """Rolling window of true values and component predictions for MH weighting and bounds."""
     def __init__(self, max_size=200):
-        self.residuals: list[float] = []
+        self.y_true = []
+        self.pred_gru = []
+        self.pred_lgbm = []
         self.max_size = max_size
 
-    def add(self, predicted: float, actual: float | None):
+    def add(self, actual, gru_val, lgbm_val):
         if actual is not None and not np.isnan(actual):
-            self.residuals.append(predicted - actual)
-            if len(self.residuals) > self.max_size:
-                self.residuals.pop(0)
+            self.y_true.append(actual)
+            self.pred_gru.append(gru_val)
+            self.pred_lgbm.append(lgbm_val)
+            if len(self.y_true) > self.max_size:
+                self.y_true.pop(0)
+                self.pred_gru.pop(0)
+                self.pred_lgbm.pop(0)
 
-    def get(self) -> np.ndarray | None:
-        return np.array(self.residuals) if len(self.residuals) >= 3 else None
+    def get(self):
+        if len(self.y_true) >= 3:
+            return np.array(self.y_true), np.array(self.pred_gru), np.array(self.pred_lgbm)
+        return None, None, None
 
 
-mh_estimator = MHUncertaintyEstimator()
-residual_tracker = ResidualTracker()
-
-
-def unscale_prediction(scaled_pred: float, y_raw: np.ndarray, y_scaled: np.ndarray) -> float:
-    m, c = np.polyfit(y_scaled, y_raw, 1)
-    return float((scaled_pred * m) + c)
+mh_estimator = MHWeightEstimator()
+history_tracker = HistoryTracker()
 
 
 # ═══════════════════════════════════════════════════════════════════
 # CORE PREDICTION PIPELINE
 # ═══════════════════════════════════════════════════════════════════
 def run_prediction(live_window: pd.DataFrame) -> dict:
-    """Run the full GRU + LightGBM hybrid pipeline on a 25-row window.
+    """Run the full GRU + LightGBM hybrid pipeline on the window context.
 
     Returns a dict with all prediction outputs.
     """
     current_hour_data = live_window.iloc[-1].copy()
 
     # Engineer Time Features
-    live_window['Hour'], live_window['DayOfWeek'], live_window['Month'] = live_window['Timestamp'].dt.hour, live_window['Timestamp'].dt.dayofweek, live_window['Timestamp'].dt.month
-    live_window['Hour_Sin'], live_window['Hour_Cos'] = np.sin(2 * np.pi * live_window['Hour'] / 24), np.cos(2 * np.pi * live_window['Hour'] / 24)
-    live_window['DayOfWeek_Sin'], live_window['DayOfWeek_Cos'] = np.sin(2 * np.pi * live_window['DayOfWeek'] / 7), np.cos(2 * np.pi * live_window['DayOfWeek'] / 7)
-    live_window['Month_Sin'], live_window['Month_Cos'] = np.sin(2 * np.pi * live_window['Month'] / 12), np.cos(2 * np.pi * live_window['Month'] / 12)
-    live_window['Is_Weekend'] = (live_window['DayOfWeek'] >= 5).astype(int)
+    live_window['hour'] = live_window['Timestamp'].dt.hour
+    live_window['day_of_week_num'] = live_window['Timestamp'].dt.dayofweek
+    live_window['month'] = live_window['Timestamp'].dt.month
+    
+    live_window['hour_sin'] = np.sin(2 * np.pi * live_window['hour'] / 24)
+    live_window['hour_cos'] = np.cos(2 * np.pi * live_window['hour'] / 24)
+    live_window['dow_sin'] = np.sin(2 * np.pi * live_window['day_of_week_num'] / 7)
+    live_window['dow_cos'] = np.cos(2 * np.pi * live_window['day_of_week_num'] / 7)
+    live_window['month_sin'] = np.sin(2 * np.pi * live_window['month'] / 12)
+    live_window['month_cos'] = np.cos(2 * np.pi * live_window['month'] / 12)
+    live_window['is_weekend'] = (live_window['day_of_week_num'] >= 5).astype(int)
 
-    live_window['Lag_1h'] = live_window['Energy_kW'].shift(1).bfill()
-    live_window['Lag_2h'] = live_window['Energy_kW'].shift(2).bfill()
-    live_window['Lag_3h'] = live_window['Energy_kW'].shift(3).bfill()
-    live_window['Lag_24h'] = live_window['Energy_kW'].shift(24).bfill()
-    live_window['Rolling_Mean_3h'] = live_window['Energy_kW'].shift(1).rolling(3, min_periods=1).mean()
-    live_window['Rolling_Std_3h'] = live_window['Energy_kW'].shift(1).rolling(3, min_periods=1).std().fillna(0)
+    # Engineer Lag Features
+    live_window['lag_1'] = live_window['Energy_kW'].shift(1).bfill()
+    live_window['lag_2'] = live_window['Energy_kW'].shift(2).bfill()
+    live_window['lag_3'] = live_window['Energy_kW'].shift(3).bfill()
+    live_window['lag_24'] = live_window['Energy_kW'].shift(24).bfill()
+    live_window['lag_168'] = live_window['Energy_kW'].shift(168).bfill()
+    
+    live_window['rolling_mean_3'] = live_window['Energy_kW'].shift(1).rolling(3, min_periods=1).mean()
+    live_window['rolling_std_3'] = live_window['Energy_kW'].shift(1).rolling(3, min_periods=1).std().fillna(0)
+    live_window['rolling_mean_24'] = live_window['Energy_kW'].shift(1).rolling(24, min_periods=1).mean()
+    live_window['rolling_std_24'] = live_window['Energy_kW'].shift(1).rolling(24, min_periods=1).std().fillna(0)
 
+    # Note: perfectdata3 natively has 'time_of_day' as well as temperature, humidity, lux, occupancy
+    # which we've renamed appropriately. We need to ensure columns match scaler expected names exactly:
+    feature_df = pd.DataFrame()
+    feature_df['time_of_day'] = live_window.get('time_of_day', live_window['hour']) # fallback to hour
+    feature_df['temperature'] = live_window['Temperature_C']
+    feature_df['humidity'] = live_window['Humidity_%']
+    feature_df['lux'] = live_window['Luminous_Intensity_Lux']
+    feature_df['occupancy'] = live_window['Occupancy']
+    feature_df['hour'] = live_window['hour']
+    feature_df['day_of_week_num'] = live_window['day_of_week_num']
+    feature_df['month'] = live_window['month']
+    feature_df['is_weekend'] = live_window['is_weekend']
+    feature_df['hour_sin'] = live_window['hour_sin']
+    feature_df['hour_cos'] = live_window['hour_cos']
+    feature_df['dow_sin'] = live_window['dow_sin']
+    feature_df['dow_cos'] = live_window['dow_cos']
+    feature_df['month_sin'] = live_window['month_sin']
+    feature_df['month_cos'] = live_window['month_cos']
+    feature_df['lag_1'] = live_window['lag_1']
+    feature_df['lag_2'] = live_window['lag_2']
+    feature_df['lag_3'] = live_window['lag_3']
+    feature_df['lag_24'] = live_window['lag_24']
+    feature_df['lag_168'] = live_window['lag_168']
+    feature_df['rolling_mean_3'] = live_window['rolling_mean_3']
+    feature_df['rolling_std_3'] = live_window['rolling_std_3']
+    feature_df['rolling_mean_24'] = live_window['rolling_mean_24']
+    feature_df['rolling_std_24'] = live_window['rolling_std_24']
 
-    expected_gru = ['Energy_kW', 'Temperature_C', 'Humidity_%', 'Luminous_Intensity_Lux', 'Lag_1h', 'Lag_2h', 'Lag_3h', 'Lag_24h', 'Rolling_Mean_3h', 'Rolling_Std_3h', 'Occupancy', 'Is_Weekend', 'Hour_Sin', 'Hour_Cos', 'DayOfWeek_Sin', 'DayOfWeek_Cos', 'Month_Sin', 'Month_Cos']
-    expected_lgb = expected_gru[1:]
+    # Final feature alignment check
+    feature_df = feature_df[EXPECTED_FEATURES]
 
-    # STRICT COLUMN ALIGNMENT FIX
-    scaler_cols = [c.split('__')[-1] for c in scaler.get_feature_names_out()]
-    scaled_window = pd.DataFrame(scaler.transform(live_window[scaler_cols].fillna(0.0)), columns=scaler_cols)
-
-    # TE-GRU Inference (Only give it the first 24 rows)
-    tensor_input = np.array([scaled_window[expected_gru].iloc[:-1].values], dtype=np.float32)
+    # Scaling
+    scaled_features_arr = scaler_X.transform(feature_df.fillna(0.0))
+    
+    # ── TE-GRU Inference ──
+    # The GRU needs exactly a 24-step sequence. We'll take the last 24 steps EXCEPT the very last row
+    # because the target of prediction is the very last row.
+    gru_seq_start = -25
+    gru_seq_end = -1
+    tensor_input = np.array([scaled_features_arr[gru_seq_start:gru_seq_end]], dtype=np.float32)
     interpreter.set_tensor(input_details[0]['index'], tensor_input)
     interpreter.invoke()
     gru_scaled = interpreter.get_tensor(output_details[0]['index'])[0][0]
+    gru_raw = scaler_y.inverse_transform([[gru_scaled]])[0][0]
 
-    gru_raw = unscale_prediction(gru_scaled, live_window['Energy_kW'].iloc[:-1].values, scaled_window['Energy_kW'].iloc[:-1].values)
+    # ── LightGBM Inference ──
+    # LightGBM uses just the current row's features (excluding the true target, which is what we predict)
+    lgb_input = scaled_features_arr[-1:]
+    lgbm_scaled = lgb_model.predict(lgb_input)[0]
+    lgbm_raw = scaler_y.inverse_transform([[lgbm_scaled]])[0][0]
 
-    # LightGBM Inference (Only give it the 25th live row)
-    lgb_input = scaled_window[expected_lgb].iloc[-1:].reset_index(drop=True)
-    residual_correction = lgb_corrector.predict(lgb_input)[0]
-
-    hybrid_final_kwh = gru_raw + residual_correction
-
-    # Bayesian Uncertainty Bounds (uses real prediction residuals)
-    tracked = residual_tracker.get()
-    if tracked is not None:
-        init_sigma = float(np.std(tracked))
-        dynamic_sigma = mh_estimator.estimate_sigma(tracked, initial_sigma=init_sigma)
+    # ── MH Adaptive Weight Blending & Bounds ──
+    y_hist, gru_hist, lgbm_hist = history_tracker.get()
+    
+    if y_hist is not None:
+        best_w = mh_estimator.estimate_weight(y_hist, gru_hist, lgbm_hist)
+        blended_hist = best_w * gru_hist + (1 - best_w) * lgbm_hist
+        residual_std = float(np.std(y_hist - blended_hist))
     else:
-        # Cold start: use tight default (~5% of prediction) until residuals accumulate
-        dynamic_sigma = max(0.01, abs(hybrid_final_kwh) * 0.05)
+        best_w = 0.5
+        residual_std = max(0.01, abs(gru_raw) * 0.05)
 
-    lower_bound = max(0.0, hybrid_final_kwh - 1.96 * dynamic_sigma)
-    upper_bound = hybrid_final_kwh + 1.96 * dynamic_sigma
+    hybrid_final_kwh = best_w * gru_raw + (1 - best_w) * lgbm_raw
+    
+    z = 1.5
+    lower_bound = max(0.0, hybrid_final_kwh - z * residual_std)
+    upper_bound = hybrid_final_kwh + z * residual_std
 
     actual_val = current_hour_data['Energy_kW']
     actual_kw = round(float(actual_val), 4) if pd.notna(actual_val) else None
 
-    # Track residual for future uncertainty estimation
-    residual_tracker.add(hybrid_final_kwh, actual_kw)
+    # Track components for future weighting and bounds estimation
+    history_tracker.add(actual_kw, gru_raw, lgbm_raw)
 
     return {
         "timestamp": str(current_hour_data['Timestamp']),
@@ -245,10 +280,11 @@ def run_prediction(live_window: pd.DataFrame) -> dict:
         "predictions": {
             "actual_energy_kw": actual_kw,
             "base_gru_kwh": round(gru_raw, 4),
-            "lgbm_correction_kwh": round(residual_correction, 4),
+            "lgbm_kwh": round(lgbm_raw, 4),
             "hybrid_final_kwh": round(hybrid_final_kwh, 4),
             "safety_lower_bound": round(lower_bound, 4),
-            "safety_upper_bound": round(upper_bound, 4)
+            "safety_upper_bound": round(upper_bound, 4),
+            "hybrid_weight_gru": round(best_w, 4)
         }
     }
 
