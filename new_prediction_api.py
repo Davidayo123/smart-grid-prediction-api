@@ -89,6 +89,64 @@ output_details = interpreter.get_output_details()
 print("[OK] AI assets loaded")
 
 
+def _find_csv_index(datetime_str: str) -> int | None:
+    """Find the CSV row index to provide the best matching lag history context.
+
+    If an exact match (within 1 hour) exists, it returns it.
+    If the date is far in the future or not in the dataset, it performs
+    a fallback search for a similar historical profile to construct lag features:
+      Step 1: Matches Month, Day-of-Week, and Hour
+      Step 2: Matches Day-of-Week and Hour
+      Step 3: Matches just Hour
+    Always ensures the found index has >= 168 rows before it for the window.
+    """
+    try:
+        target = pd.Timestamp(datetime_str)
+    except Exception:
+        return None
+
+    # Only consider rows that have enough history
+    valid_mask = df_sim.index >= WINDOW_SIZE
+    valid_df = df_sim[valid_mask]
+    
+    if len(valid_df) == 0:
+        return WINDOW_SIZE
+
+    # Try 1: Exact timestamp match (within 1 hour)
+    diffs = (valid_df['Timestamp'] - target).abs()
+    best_idx = int(diffs.idxmin())
+    if diffs.loc[best_idx] <= pd.Timedelta(hours=1):
+        return best_idx
+
+    # Try 2: Semantic Match - Month, Day of Week, and Hour
+    mask_mdh = (
+        (valid_df['Timestamp'].dt.month == target.month) &
+        (valid_df['Timestamp'].dt.dayofweek == target.dayofweek) &
+        (valid_df['Timestamp'].dt.hour == target.hour)
+    )
+    matches_mdh = valid_df[mask_mdh]
+    if len(matches_mdh) > 0:
+        return int(matches_mdh.index[-1])  # Use most recent comparable occurrence
+
+    # Try 3: Semantic Match - Day of Week and Hour (ignore month)
+    mask_dh = (
+        (valid_df['Timestamp'].dt.dayofweek == target.dayofweek) &
+        (valid_df['Timestamp'].dt.hour == target.hour)
+    )
+    matches_dh = valid_df[mask_dh]
+    if len(matches_dh) > 0:
+        return int(matches_dh.index[-1])
+
+    # Try 4: Semantic Match - Just Hour
+    mask_h = (valid_df['Timestamp'].dt.hour == target.hour)
+    matches_h = valid_df[mask_h]
+    if len(matches_h) > 0:
+        return int(matches_h.index[-1])
+
+    # Safest structural fallback
+    return WINDOW_SIZE
+
+
 # ═══════════════════════════════════════════════════════════════════
 # BAYESIAN UNCERTAINTY & ADAPTIVE WEIGHT ESTIMATOR
 # ═══════════════════════════════════════════════════════════════════
@@ -230,11 +288,9 @@ def run_prediction(live_window: pd.DataFrame) -> dict:
     scaled_features_arr = scaler_X.transform(feature_df.fillna(0.0))
     
     # ── TE-GRU Inference ──
-    # The GRU needs exactly a 24-step sequence. We'll take the last 24 steps EXCEPT the very last row
-    # because the target of prediction is the very last row.
-    gru_seq_start = -25
-    gru_seq_end = -1
-    tensor_input = np.array([scaled_features_arr[gru_seq_start:gru_seq_end]], dtype=np.float32)
+    # The GRU needs exactly a 24-step sequence. We'll take the last 24 steps which include
+    # the very last line where manual input variables exist for inference.
+    tensor_input = np.array([scaled_features_arr[-24:]], dtype=np.float32)
     interpreter.set_tensor(input_details[0]['index'], tensor_input)
     interpreter.invoke()
     gru_scaled = interpreter.get_tensor(output_details[0]['index'])[0][0]
@@ -254,8 +310,9 @@ def run_prediction(live_window: pd.DataFrame) -> dict:
         blended_hist = best_w * gru_hist + (1 - best_w) * lgbm_hist
         residual_std = float(np.std(y_hist - blended_hist))
     else:
-        best_w = 0.5
-        residual_std = max(0.01, abs(gru_raw) * 0.05)
+        # Default: favor LightGBM (R²≈0.90) over GRU (R²≈0.62)
+        best_w = 0.3
+        residual_std = max(0.05, abs(lgbm_raw) * 0.10)
 
     hybrid_final_kwh = best_w * gru_raw + (1 - best_w) * lgbm_raw
     
@@ -418,19 +475,33 @@ class SensorInput(BaseModel):
 @app.post("/predict")
 def predict_manual(sensor: SensorInput):
     """Accept manually-typed sensor values, inject them into the model's
-    current CSV window row, and return the prediction.
+    context window and return the prediction.
 
-    The GRU still uses 24 rows of CSV history for context, but YOUR
-    values replace the 25th (current) row so you can see how the model
-    responds to your inputs.
+    If a datetime_str is provided, the system looks up the matching row
+    in the CSV and uses that row's full context window (168 preceding
+    rows) so that lag features are historically accurate.  The user's
+    sensor values still override the current row.
+
+    Without datetime_str, the current sim-index position is used.
     """
     global current_sim_index
 
-    if current_sim_index >= len(df_sim):
-        current_sim_index = WINDOW_SIZE
+    # ── Determine which context window to use ──
+    matched_idx = None
+    if sensor.datetime_str:
+        matched_idx = _find_csv_index(sensor.datetime_str)
+
+    if matched_idx is not None:
+        # Use the matched row's own context — lag features will be correct
+        ctx_index = matched_idx
+    else:
+        # Fall back to current sim position
+        if current_sim_index >= len(df_sim):
+            current_sim_index = WINDOW_SIZE
+        ctx_index = current_sim_index
 
     live_window = df_sim.iloc[
-        current_sim_index - WINDOW_SIZE : current_sim_index + 1
+        ctx_index - WINDOW_SIZE : ctx_index + 1
     ].copy()
 
     # Override the last row with manual inputs
@@ -441,19 +512,19 @@ def predict_manual(sensor: SensorInput):
     live_window.loc[idx, 'Occupancy'] = sensor.occupancy
     live_window.loc[idx, 'Energy_kW'] = np.nan
 
-    # Use user-provided datetime (or default to now)
+    # Sync timestamp and time_of_day
     if sensor.datetime_str:
         try:
             user_ts = pd.Timestamp(sensor.datetime_str)
         except Exception:
-            user_ts = pd.Timestamp.now()
+            user_ts = live_window.loc[idx, 'Timestamp']
     else:
-        user_ts = pd.Timestamp.now()
+        user_ts = live_window.loc[idx, 'Timestamp']
     live_window.loc[idx, 'Timestamp'] = user_ts
+    live_window.loc[idx, 'time_of_day'] = user_ts.hour
 
     res = run_prediction(live_window)
-    # Exclude `current_sim_index += 1` here so manual predictions don't advance the simulation clock.
-    # Otherwise, multiple clicks on the same input will diverge as the real history shifts forward.
+    # Manual predictions don't advance the simulation clock.
     return res
 
 
